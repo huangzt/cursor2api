@@ -44,9 +44,16 @@ function getChromeHeaders(xIsHuman: string): Record<string, string> {
 
 // ==================== Token 管理 ====================
 
-let cachedToken: { value: string; createdAt: number } | null = null;
 let envJS: string = '';
 let mainJS: string = '';
+
+interface TokenEntry {
+    value: string;
+    createdAt: number;
+}
+const tokenPool: TokenEntry[] = [];
+const MAX_POOL_SIZE = 5;
+let isGenerating = false;
 
 const TOKEN_EXPIRY_MS = 25 * 60 * 1000; // 25 分钟
 const TOKEN_REFRESH_MS = 20 * 60 * 1000; // 20 分钟时刷新
@@ -138,7 +145,25 @@ async function generateToken(): Promise<string> {
 }
 
 /**
- * 获取有效的 x-is-human token（带缓存）
+ * 异步补充 Token 池
+ */
+async function replenishPool(): Promise<void> {
+    if (isGenerating) return;
+    isGenerating = true;
+    try {
+        console.log(`[Token] 补充 token 池 (当前有效: ${tokenPool.length}/${MAX_POOL_SIZE})...`);
+        const token = await generateToken();
+        tokenPool.push({ value: token, createdAt: Date.now() });
+        console.log(`[Token] ✓ 成功添加到资源池 (当前大小: ${tokenPool.length})`);
+    } catch (e) {
+        console.error('[Token] ✗ 补充池失败:', e);
+    } finally {
+        isGenerating = false;
+    }
+}
+
+/**
+ * 获取有效的 x-is-human token（从池中随机抽取以分散风控特征）
  */
 export async function getXIsHumanToken(): Promise<string> {
     // 如果没有脚本，返回空（某些场景可能不需要 token）
@@ -147,24 +172,46 @@ export async function getXIsHumanToken(): Promise<string> {
         return '';
     }
 
-    // 检查缓存是否有效
-    if (cachedToken && (Date.now() - cachedToken.createdAt) < TOKEN_REFRESH_MS) {
-        return cachedToken.value;
+    const now = Date.now();
+
+    // 1. 清理过期 Token (>=25分钟)
+    for (let i = tokenPool.length - 1; i >= 0; i--) {
+        if (now - tokenPool[i].createdAt >= TOKEN_EXPIRY_MS) {
+            tokenPool.splice(i, 1);
+        }
     }
 
+    // 2. 筛选仍然新鲜的 Token (<20分钟)
+    const freshTokens = tokenPool.filter(t => (now - t.createdAt) < TOKEN_REFRESH_MS);
+
+    // 3. 如果池子没满，且当前没有在生成，则异步触发补充机制
+    if (freshTokens.length < MAX_POOL_SIZE && !isGenerating) {
+        // 后台异步生成，不阻塞请求
+        replenishPool().catch(console.error);
+    }
+
+    // 4. 如果有新鲜 token，从中随机挑选一个（分散风控特征）
+    if (freshTokens.length > 0) {
+        const randomIndex = Math.floor(Math.random() * freshTokens.length);
+        return freshTokens[randomIndex].value;
+    }
+
+    // 5. 如果没有新鲜的，但有即将过期的 (20-25分钟内)，作为过渡先使用最近生成的一个
+    if (tokenPool.length > 0) {
+        const lastValid = [...tokenPool].sort((a, b) => b.createdAt - a.createdAt)[0];
+        console.warn('[Token] 暂无新鲜 token，使用临近过期的就近 token 作为过渡');
+        return lastValid.value;
+    }
+
+    // 6. 连过期的都没有，只能同步阻塞等待生成一个
     try {
-        console.log('[Token] 生成新 token...');
+        console.log('[Token] 资源池为空，同步等待生成新 token...');
         const token = await generateToken();
-        cachedToken = { value: token, createdAt: Date.now() };
-        console.log('[Token] ✓ 生成成功');
+        tokenPool.push({ value: token, createdAt: Date.now() });
+        console.log('[Token] ✓ 同步生成成功');
         return token;
     } catch (e) {
-        console.error('[Token] ✗ 生成失败:', e);
-        // 如果有旧 token 且未过期，继续使用
-        if (cachedToken && (Date.now() - cachedToken.createdAt) < TOKEN_EXPIRY_MS) {
-            console.warn('[Token] 使用旧 token（仍在有效期内）');
-            return cachedToken.value;
-        }
+        console.error('[Token] ✗ 同步生成失败:', e);
         return '';
     }
 }
