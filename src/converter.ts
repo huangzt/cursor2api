@@ -35,11 +35,15 @@ const CORE_TOOL_NAMES = new Set([
 ]);
 
 /**
- * 过滤工具 — 只保留核心工具
+ * 过滤工具
+ * 如果工具数量不多（≤40），直接返回全部，以支持动态 MCP 工具和所有扩展
+ * 只有当工具数量极多时才进行核心工具过滤，以防提示词过载
  */
 function filterCoreTools(tools: AnthropicTool[]): AnthropicTool[] {
+    if (tools.length <= 40) return tools;
+
     const filtered = tools.filter(t => CORE_TOOL_NAMES.has(t.name));
-    if (filtered.length === 0) return tools.slice(0, 20);
+    if (filtered.length === 0) return tools.slice(0, 40);
     return filtered;
 }
 
